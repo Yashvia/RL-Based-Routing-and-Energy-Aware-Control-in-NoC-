@@ -1,0 +1,15 @@
+routing,injection_rate,avg_latency
+dor,0.002,48.9286
+dor,0.004,56.389
+dor,0.006,77.5391
+dor,0.008,228.442
+dor,0.010,248.695
+dor,0.012,335.839
+dor,0.014,439.915
+min_adapt,0.002,49.553
+min_adapt,0.004,57.5591
+min_adapt,0.006,83.2373
+min_adapt,0.008,189.066
+min_adapt,0.010,279.557
+min_adapt,0.012,349.17
+min_adapt,0.014,451.996

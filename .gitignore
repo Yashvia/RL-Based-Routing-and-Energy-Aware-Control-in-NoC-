@@ -1,5 +1,7 @@
-*~
-\#*#
-._*
-.Apple*
-.DS_Store
+src/booksim
+src/*.o
+src/lex.yy.c
+src/y.tab.c
+src/y.tab.h
+*.txt
+raw_output.txt
