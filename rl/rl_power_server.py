@@ -17,13 +17,22 @@ import subprocess
 import numpy as np
 
 from rl_power_starter import PowerAgent, STATE_DIM
-from reward import compute_reward, sample_injection_rate, NONCONVERGENCE_PENALTY
+from reward import compute_reward, sample_injection_rate_for_pattern, NONCONVERGENCE_PENALTY, sample_traffic_pattern
 
 RL_DIR = os.path.dirname(os.path.abspath(__file__))
 REPO_ROOT = os.path.dirname(RL_DIR)
 BOOKSIM_CWD = os.path.join(REPO_ROOT, "booksim2", "src")
 BOOKSIM_BIN = os.path.join(BOOKSIM_CWD, "booksim")
 BOOKSIM_CONFIG = "examples/mesh88_lat"
+
+# rl_power_server.py
+CHECKPOINT_PATH = "best_power_agent.pkl"
+agent = PowerAgent(seed=1)
+if os.path.isfile(CHECKPOINT_PATH):
+    agent.load(CHECKPOINT_PATH)
+    print(f"Resumed from {CHECKPOINT_PATH}, best_eval_score={agent.best_eval_score:.4f}")
+else:
+    print("No checkpoint found, starting fresh.")
 
 if not os.path.isfile(BOOKSIM_BIN):
     raise SystemExit(f"booksim binary not found at {BOOKSIM_BIN} -- build it with `make` in booksim2/src")
@@ -36,13 +45,22 @@ MSG_DIM = STATE_DIM                          # 5 floats, no direction-validity f
 LATENCY_RE = re.compile(r"Packet latency average = ([0-9.]+) \(([0-9]+) samples\)")
 
 N_EPISODES = 300
-EVAL_RATES = [0.005, 0.010, 0.015, 0.018]
+
+EVAL_RATES_BY_PATTERN = {
+    "uniform":    [0.005, 0.010, 0.015, 0.018],
+    "tornado":    [0.005, 0.008, 0.011, 0.013],
+    "bitcomp":    [0.003, 0.006, 0.009, 0.0105],
+    "transpose":  [0.002, 0.004, 0.006, 0.0068],
+    "hotspot(0)": [0.0003, 0.0005, 0.0006, 0.0007],
+}
+
 EVAL_EVERY = 25
 POWER_MW = {0: 226.99, 1: 152.63, 2: 111.09}  # Active, Balanced, Eco -- from Orion3 measurements, §2
 ACTIVE_POWER_MW = POWER_MW[0]
 
-def run_one_episode(agent, rng, episode_num, greedy=False, forced_rate=None):
-    injection_rate = forced_rate if forced_rate is not None else sample_injection_rate(rng)
+def run_one_episode(agent, rng, episode_num, greedy=False, forced_rate=None, forced_traffic=None, force_active=False):
+    traffic_pattern = forced_traffic if forced_traffic is not None else sample_traffic_pattern(rng)
+    injection_rate = forced_rate if forced_rate is not None else sample_injection_rate_for_pattern(rng, traffic_pattern)
     seed = episode_num
 
     if os.path.exists(SOCKET_PATH):
@@ -56,7 +74,7 @@ def run_one_episode(agent, rng, episode_num, greedy=False, forced_rate=None):
     cmd = [
         BOOKSIM_BIN, BOOKSIM_CONFIG,
         "routing_function=dor_rlpower",
-        "traffic=uniform",
+        f"traffic={traffic_pattern}",
         f"injection_rate={injection_rate}",
         "sim_count=3",
         f"seed={seed}",
@@ -109,7 +127,8 @@ def run_one_episode(agent, rng, episode_num, greedy=False, forced_rate=None):
     else:
         episode_latency = float(match.group(1))
         mode_choices = [action for (_state, action) in transitions]  # already 0-2, no //4 needed
-        reward = compute_reward(episode_latency, injection_rate, mode_choices)
+        reward = compute_reward(episode_latency, injection_rate, 
+mode_choices, traffic_pattern)
         avg_power = sum(POWER_MW[m] for m in mode_choices) / len(mode_choices)
         mode_counts = {m: mode_choices.count(m) / len(mode_choices) for m in (0, 1, 2)}
     return episode_num, injection_rate, reward, len(transitions), stdout, transitions, episode_latency, avg_power, mode_counts
@@ -127,6 +146,12 @@ def train_on_episode(agent, transitions, reward, n_train_steps=20):
 
 def main():
     agent = PowerAgent(seed=1)
+    if os.path.isfile(CHECKPOINT_PATH):
+        agent.load(CHECKPOINT_PATH)
+        print(f"Resumed from {CHECKPOINT_PATH}, best_eval_score={agent.best_eval_score:.4f}")
+    else:
+        print("No checkpoint found, starting fresh.")
+
     rng = np.random.default_rng(seed=1)
 
     reward_history = []
@@ -143,15 +168,24 @@ def main():
             train_on_episode(agent, transitions, reward)
         agent.decay_epsilon()
         reward_history.append(reward)
-
+        EVAL_PATTERNS = ["uniform", "transpose", "hotspot(0)"]
         if ep % EVAL_EVERY == 0:
             eval_scores = []
-            for eval_rate in EVAL_RATES:
-                eval_result = run_one_episode(agent, rng, ep, greedy=True, forced_rate=eval_rate)
-                e_num, e_rate, e_reward, e_dec, e_stdout = eval_result[:5]
-                e_lat = eval_result[6] if len(eval_result) > 6 else None
-                print(f"  EVAL @ep{ep} rate={e_rate:.4f}: latency={e_lat} reward={e_reward:.4f}")
-                eval_scores.append(e_reward)
+            for pattern in EVAL_PATTERNS:
+                for eval_rate in EVAL_RATES_BY_PATTERN[pattern]:
+                    eval_result = run_one_episode(agent, rng, ep, greedy=True, forced_rate=eval_rate, forced_traffic=pattern)
+                    e_num, e_rate, e_reward, e_dec, e_stdout = eval_result[:5]
+                    e_lat = eval_result[6] if len(eval_result) > 6 else None
+                    e_power = eval_result[7] if len(eval_result) > 7 else None
+                    e_modes = eval_result[8] if len(eval_result) > 8 else None
+                    if e_power is not None:
+                        savings = 100 * (1 - e_power / ACTIVE_POWER_MW)
+                        print(f"  EVAL @ep{ep} pattern={pattern} rate={e_rate:.4f}: latency={e_lat} reward={e_reward:.4f} "
+                          f"avg_power={e_power:.1f}mW ({savings:+.1f}% vs Active) modes={e_modes}")
+                    else:
+                        print(f"  EVAL @ep{ep} pattern={pattern} rate={e_rate:.4f}: latency={e_lat} reward={e_reward:.4f}")
+                    eval_scores.append(e_reward)
+
             avg_eval = sum(eval_scores) / len(eval_scores)
             if avg_eval > agent.best_eval_score:
                 agent.best_eval_score = avg_eval

@@ -32,7 +32,7 @@ class PowerAgent:
                  epsilon=0.2, epsilon_min=0.05, epsilon_decay=0.97, seed=0):
         self.q_net = QNetwork(state_dim, n_actions, seed=seed)
         self.target_net = copy.deepcopy(self.q_net)
-        self.target_update_every = 50
+        self.target_update_every = 150
         self.train_steps_count = 0
         self.gamma = gamma
         self.epsilon = epsilon
@@ -70,12 +70,14 @@ class PowerAgent:
 
     def save(self, path):
         with open(path, "wb") as f:
-            pickle.dump(self.q_net,f)
+            pickle.dump({"q_net": self.q_net, "best_eval_score": self.best_eval_score, "epsilon": self.epsilon}, f)
 
-    def load(self, path):                           # NEW
+    def load(self, path):
         with open(path, "rb") as f:
-            self.q_net = pickle.load(f)
+            data = pickle.load(f)
+            self.q_net = data["q_net"]
             self.target_net = copy.deepcopy(self.q_net)
-
+            self.best_eval_score = data["best_eval_score"]
+            self.epsilon = data.get("epsilon", self.epsilon)  # backward-compatible with older checkpoints
     def decay_epsilon(self):
         self.epsilon = max(self.epsilon_min, self.epsilon * self.epsilon_decay)

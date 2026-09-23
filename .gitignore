@@ -5,3 +5,5 @@ src/y.tab.c
 src/y.tab.h
 *.txt
 raw_output.txt
+__pycache__/
+*.pyc

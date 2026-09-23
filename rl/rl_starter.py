@@ -32,6 +32,7 @@ REWARD:
 import numpy as np
 import random
 import copy
+import pickle
 from collections import deque
 
 # ---------------------------------------------------------------------
@@ -150,45 +151,44 @@ class QNetwork:
         self.W1 -= self.lr * dW1
         self.b1 -= self.lr * db1
 
-
 class DQNAgent:
-    def __init__(self, state_dim, n_actions, gamma=0.9, epsilon=0.2, epsilon_min=0.05, epsilon_decay=0.97, seed=0):
+    def __init__(self, state_dim, n_actions, gamma=0.9, epsilon=0.2,
+                 epsilon_min=0.05, epsilon_decay=0.97, seed=0):
         self.q_net = QNetwork(state_dim, n_actions, seed=seed)
-        self.target_net = copy.deepcopy(self.q_net)   # NEW: frozen copy for stable targets
-        self.target_update_every = 50                  # NEW: how often to refresh it (in train_step calls)
-        self.train_steps_count = 0       
+        self.target_net = copy.deepcopy(self.q_net)
+        self.target_update_every = 150
+        self.train_steps_count = 0
         self.gamma = gamma
         self.epsilon = epsilon
+        self.epsilon_min = epsilon_min
+        self.epsilon_decay = epsilon_decay
         self.n_actions = n_actions
         self.replay = deque(maxlen=300_000)
         self.rng = random.Random(seed)
-        self.epsilon_min = epsilon_min
-        self.epsilon_decay = epsilon_decay
-
-    def decay_epsilon(self):
-        self.epsilon = max(self.epsilon_min, self.epsilon * self.epsilon_decay)
-
-    def save(self, path):
-        self.q_net.save(path)
-
-    def load(self, path):
-        self.q_net.load(path)
-
-    def act(self, state, valid_directions=None, greedy=False):
+        self.best_eval_score = float("-inf")  # NEW
+ 
+    def act(self, state, valid_directions=None, greedy=False, force_active=False):
         if valid_directions is None:
             valid_directions = list(range(N_DIRECTIONS))
-        valid_actions = [mode * N_DIRECTIONS + d for mode in range(N_MODES) for d in valid_directions]
+ 
+        if force_active:
+            # Only consider mode=0 (Active) actions: action = 0*N_DIRECTIONS + d
+            valid_actions = [0 * N_DIRECTIONS + d for d in valid_directions]
+        else:
+            valid_actions = [mode * N_DIRECTIONS + d for mode in range(N_MODES) for d in valid_directions]
+ 
         if (not greedy) and self.rng.random() < self.epsilon:
             return self.rng.choice(valid_actions)
+ 
         q_values = self.q_net.forward(state)
         masked_q = np.full_like(q_values, -np.inf)
         for a in valid_actions:
             masked_q[a] = q_values[a]
         return int(np.argmax(masked_q))
-
+ 
     def remember(self, s, a, r, s_next, done):
         self.replay.append((s, a, r, s_next, done))
-
+ 
     def train_step(self):
         if len(self.replay) < 32:
             return
@@ -198,11 +198,27 @@ class DQNAgent:
             target = r if done else r + self.gamma * np.max(q_next)
             q_current = self.q_net.forward(s)
             td_error = target - q_current[a]
+            td_error = float(np.clip(td_error, -5.0, 5.0))  # NEW: clip outlier TD errors
             self.q_net.backward(a, td_error)
+ 
         self.train_steps_count += 1
         if self.train_steps_count % self.target_update_every == 0:
-            self.target_net = copy.deepcopy(self.q_net)   # NEW: periodically sync target to live weights
+            self.target_net = copy.deepcopy(self.q_net)
+ 
+    def decay_epsilon(self):
+        self.epsilon = max(self.epsilon_min, self.epsilon * self.epsilon_decay)
+ 
+    def save(self, path):
+        with open(path, "wb") as f:
+            pickle.dump({"q_net": self.q_net, "best_eval_score": self.best_eval_score, "epsilon": self.epsilon}, f)
 
+    def load(self, path):
+        with open(path, "rb") as f:
+            data = pickle.load(f)
+            self.q_net = data["q_net"]
+            self.target_net = copy.deepcopy(self.q_net)
+            self.best_eval_score = data["best_eval_score"]
+            self.epsilon = data.get("epsilon", self.epsilon)  # backward-compatible with older checkpoints
 
 # ---------------------------------------------------------------------
 # Training loop -- run this file directly to sanity-check the whole
